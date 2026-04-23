@@ -1,123 +1,132 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { validateAssignment } = require('../models/responder');
-const { notifyResponder, broadcastIncidentUpdate } = require('../services/notificationService');
 const { getAdmin } = require('../config/firebase');
+const { broadcastIncidentUpdate } = require('../services/notificationService');
 
-const memResponders = new Map([
-  ['resp-001', { id: 'resp-001', name: 'Arjun Sharma', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2965, lng: 85.8250 }, skills: ['Fire', 'Rescue'], isOnline: true }],
-  ['resp-002', { id: 'resp-002', name: 'Priya Patel', zone: 'zone-1', status: 'en-route', currentLocation: { lat: 20.2900, lng: 85.8180 }, skills: ['Medical', 'First Aid'], isOnline: true }],
-  ['resp-003', { id: 'resp-003', name: 'Ravi Kumar', zone: 'zone-2', status: 'available', currentLocation: { lat: 20.2800, lng: 85.8300 }, skills: ['Evacuation', 'Comms'], isOnline: true }],
-]);
+const RESPONDER_POOL = [
+  { id: 'resp-f1', name: 'Arjun Sharma',        type: 'firefighter', role: 'Lead Firefighter', badge: 'FF-201', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2965, lng: 85.8250 }, skills: ['Fire', 'Rescue', 'HAZMAT'], isOnline: true },
+  { id: 'resp-f2', name: 'Deepak Rao',           type: 'firefighter', role: 'Firefighter',      badge: 'FF-202', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2910, lng: 85.8220 }, skills: ['Fire', 'First Aid'],          isOnline: true },
+  { id: 'resp-f3', name: 'Sujit Nayak',          type: 'firefighter', role: 'Firefighter',      badge: 'FF-203', zone: 'zone-2', status: 'on-scene',  currentLocation: { lat: 20.2850, lng: 85.8300 }, skills: ['Aerial Rescue'],              isOnline: true },
+  { id: 'resp-m1', name: 'Priya Patel',           type: 'paramedic',   role: 'Senior Paramedic', badge: 'PM-301', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2900, lng: 85.8180 }, skills: ['ALS', 'Trauma', 'Cardiac'],   isOnline: true },
+  { id: 'resp-m2', name: 'Rohit Mishra',          type: 'paramedic',   role: 'Paramedic',        badge: 'PM-302', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2950, lng: 85.8100 }, skills: ['BLS', 'First Aid'],           isOnline: true },
+  { id: 'resp-m3', name: 'Anita Das',             type: 'paramedic',   role: 'Paramedic',        badge: 'PM-303', zone: 'zone-2', status: 'en-route',  currentLocation: { lat: 20.3020, lng: 85.8150 }, skills: ['Obstetrics', 'Pediatrics'],   isOnline: true },
+  { id: 'resp-p1', name: 'Insp. Ravi Kumar',      type: 'police',      role: 'Inspector',        badge: 'OD-1142',zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2980, lng: 85.8260 }, skills: ['Investigation', 'Negotiation'],isOnline: true },
+  { id: 'resp-p2', name: 'SI Sneha Das',           type: 'police',      role: 'Sub Inspector',    badge: 'OD-1143',zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2940, lng: 85.8200 }, skills: ['Patrol', 'Crowd Control'],    isOnline: true },
+  { id: 'resp-p3', name: 'Const. Mohan Behera',   type: 'police',      role: 'Constable',        badge: 'OD-1144',zone: 'zone-1', status: 'on-scene',  currentLocation: { lat: 20.2870, lng: 85.8290 }, skills: ['Patrol', 'Traffic'],          isOnline: true },
+  { id: 'resp-r1', name: 'Kiran Swain',            type: 'rescue',      role: 'Rescue Specialist',badge: 'RS-401', zone: 'zone-1', status: 'available', currentLocation: { lat: 20.2920, lng: 85.8240 }, skills: ['Water Rescue', 'Rope'],       isOnline: true },
+  { id: 'resp-r2', name: 'Tapan Sahoo',            type: 'rescue',      role: 'Rescue Diver',     badge: 'RS-402', zone: 'zone-2', status: 'available', currentLocation: { lat: 20.2800, lng: 85.8320 }, skills: ['Scuba', 'Underwater'],        isOnline: true },
+];
 
-function getDb() {
-  return getAdmin()?.firestore() || null;
-}
+const memResponders = new Map(RESPONDER_POOL.map((r) => [r.id, { ...r }]));
+
+function getDb() { return getAdmin()?.firestore() || null; }
 
 // GET /api/responder/available
 router.get('/available', auth, async (req, res, next) => {
   try {
-    const { zone } = req.query;
+    const { type, zone, limit = 20 } = req.query;
     const db = getDb();
-
     let responders = [];
+
     if (db) {
-      let query = db.collection('responders').where('isOnline', '==', true);
-      if (zone) query = query.where('zone', '==', zone);
-      const snap = await query.get();
+      let q = db.collection('responders').where('isOnline', '==', true);
+      if (type) q = q.where('type', '==', type);
+      if (zone) q = q.where('zone', '==', zone);
+      q = q.limit(parseInt(limit));
+      const snap = await q.get();
       responders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     } else {
       responders = Array.from(memResponders.values())
         .filter((r) => r.isOnline)
-        .filter((r) => !zone || r.zone === zone);
+        .filter((r) => !type || r.type === type)
+        .filter((r) => !zone || r.zone === zone)
+        .slice(0, parseInt(limit));
     }
 
     res.json({ success: true, count: responders.length, responders });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
+});
+
+// GET /api/responder/all
+router.get('/all', auth, async (req, res, next) => {
+  try {
+    const db = getDb();
+    let responders = [];
+
+    if (db) {
+      const snap = await db.collection('responders').get();
+      responders = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } else {
+      responders = Array.from(memResponders.values());
+    }
+
+    // Group by type
+    const grouped = responders.reduce((acc, r) => {
+      if (!acc[r.type]) acc[r.type] = [];
+      acc[r.type].push(r);
+      return acc;
+    }, {});
+
+    res.json({ success: true, total: responders.length, grouped, responders });
+  } catch (err) { next(err); }
 });
 
 // POST /api/responder/assign
 router.post('/assign', auth, async (req, res, next) => {
   try {
     const { incidentId, responderId } = req.body;
-
-    const validationErrors = validateAssignment({ incidentId, responderId });
-    if (validationErrors.length > 0) {
-      return res.status(400).json({ error: 'Validation failed', details: validationErrors });
+    if (!incidentId || !responderId) {
+      return res.status(400).json({ error: 'incidentId and responderId required' });
     }
 
     const db = getDb();
     const now = new Date().toISOString();
 
     if (db) {
-      const responderRef = db.collection('responders').doc(responderId);
-      const incidentRef = db.collection('incidents').doc(incidentId);
-
-      const [rSnap, iSnap] = await Promise.all([responderRef.get(), incidentRef.get()]);
-      if (!rSnap.exists) return res.status(404).json({ error: 'Responder not found' });
-      if (!iSnap.exists) return res.status(404).json({ error: 'Incident not found' });
-
       await Promise.all([
-        responderRef.update({ status: 'en-route', activeIncident: incidentId, updatedAt: now }),
-        incidentRef.update({ assignedTo: responderId, status: 'active', updatedAt: now }),
+        db.collection('responders').doc(responderId).update({ status: 'en-route', activeIncident: incidentId, updatedAt: now }),
+        db.collection('incidents').doc(incidentId).update({ assignedTo: responderId, status: 'active', updatedAt: now }),
       ]);
-
-      const incidentData = { id: incidentId, ...iSnap.data() };
-      await notifyResponder(responderId, incidentData);
     } else {
-      const responder = memResponders.get(responderId);
-      if (!responder) return res.status(404).json({ error: 'Responder not found' });
-      memResponders.set(responderId, { ...responder, status: 'en-route', activeIncident: incidentId });
+      const r = memResponders.get(responderId);
+      if (r) memResponders.set(responderId, { ...r, status: 'en-route', activeIncident: incidentId });
     }
 
     await broadcastIncidentUpdate(incidentId, { assignedTo: responderId, status: 'active' });
-
-    res.json({ success: true, incidentId, responderId, message: 'Responder assigned successfully' });
-  } catch (err) {
-    next(err);
-  }
+    res.json({ success: true, incidentId, responderId, message: 'Responder assigned' });
+  } catch (err) { next(err); }
 });
 
 // PATCH /api/responder/:id/location
 router.patch('/:id/location', auth, async (req, res, next) => {
   try {
-    const { id } = req.params;
     const { lat, lng } = req.body;
-
     if (typeof lat !== 'number' || typeof lng !== 'number') {
       return res.status(400).json({ error: 'lat and lng must be numbers' });
     }
 
-    const db = getDb();
     const location = { lat, lng, updatedAt: new Date().toISOString() };
+    const db = getDb();
 
     if (db) {
-      await db.collection('responders').doc(id).update({ currentLocation: location });
+      await db.collection('responders').doc(req.params.id).update({ currentLocation: location });
     } else {
-      const r = memResponders.get(id);
-      if (r) memResponders.set(id, { ...r, currentLocation: location });
+      const r = memResponders.get(req.params.id);
+      if (r) memResponders.set(req.params.id, { ...r, currentLocation: location });
     }
 
-    // Broadcast to incident commanders
     const { getSocket } = require('../socket/socketHandler');
-    const io = getSocket();
-    if (io) io.emit('responder_update', { responderId: id, location });
+    getSocket()?.emit('responder_update', { responderId: req.params.id, location });
 
-    res.json({ success: true, responderId: id, location });
-  } catch (err) {
-    next(err);
-  }
+    res.json({ success: true, responderId: req.params.id, location });
+  } catch (err) { next(err); }
 });
 
 // PATCH /api/responder/:id/status
 router.patch('/:id/status', auth, async (req, res, next) => {
   try {
-    const { id } = req.params;
     const { status } = req.body;
-
     const VALID = ['available', 'en-route', 'on-scene', 'off-duty'];
     if (!status || !VALID.includes(status)) {
       return res.status(400).json({ error: `status must be one of: ${VALID.join(', ')}` });
@@ -127,16 +136,14 @@ router.patch('/:id/status', auth, async (req, res, next) => {
     const updates = { status, updatedAt: new Date().toISOString() };
 
     if (db) {
-      await db.collection('responders').doc(id).update(updates);
+      await db.collection('responders').doc(req.params.id).update(updates);
     } else {
-      const r = memResponders.get(id);
-      if (r) memResponders.set(id, { ...r, ...updates });
+      const r = memResponders.get(req.params.id);
+      if (r) memResponders.set(req.params.id, { ...r, ...updates });
     }
 
-    res.json({ success: true, responderId: id, status });
-  } catch (err) {
-    next(err);
-  }
+    res.json({ success: true, responderId: req.params.id, status });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;

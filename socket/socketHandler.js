@@ -20,7 +20,6 @@ function initSocket(server) {
       if (process.env.NODE_ENV === 'development') return next();
       return next(new Error('Authentication required'));
     }
-
     try {
       const admin = getAdmin();
       if (admin) {
@@ -41,57 +40,80 @@ function initSocket(server) {
 
   io.on('connection', (socket) => {
     const uid = socket.user?.uid || 'anonymous';
+    const role = socket.user?.role || 'citizen';
 
-    if (process.env.NODE_ENV === 'development') {
-      console.log(`[Socket] Client connected: ${uid} (${socket.id})`);
+    // Auto-join role room
+    socket.join(`role-${role}`);
+
+    // Responders join their personal room for targeted dispatch
+    if (role === 'responder') {
+      socket.join(`responder-${uid}`);
     }
 
-    // Update user online status
-    updateUserOnlineStatus(uid, true);
-
-    // Handle zone join (for zone-specific alerts)
+    // Join zone room
     socket.on('join_zone', (zoneId) => {
-      if (typeof zoneId === 'string' && zoneId.match(/^zone-\w+$/)) {
+      if (typeof zoneId === 'string' && /^zone-[\w-]+$/.test(zoneId)) {
         socket.join(`zone-${zoneId}`);
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`[Socket] ${uid} joined zone: ${zoneId}`);
-        }
       }
     });
 
-    // Handle responder location updates
-    socket.on('responder_location', (payload) => {
+    // Responder location broadcast
+    socket.on('responder_location', async (payload) => {
       if (!payload?.lat || !payload?.lng) return;
-      // Broadcast to all admins/commanders in the same zone
-      io.emit('responder_update', {
+      io.to('role-admin').emit('responder_update', {
         responderId: uid,
         location: { lat: payload.lat, lng: payload.lng },
         timestamp: new Date().toISOString(),
       });
-
-      // Update Firestore location
       updateResponderLocation(uid, payload);
     });
 
-    // Handle mark safe
+    // Responder accepts/declines dispatch (real-time via socket)
+    socket.on('dispatch_response', async (payload) => {
+      const { incidentId, action, reason } = payload;
+      if (!incidentId || !['accept', 'decline'].includes(action)) return;
+
+      // Forward to all admin/commander connections immediately
+      io.to('role-admin').emit('dispatch_response_received', {
+        incidentId,
+        responderId: uid,
+        action,
+        reason: reason || '',
+        timestamp: new Date().toISOString(),
+      });
+
+      // If declined, notify next standby
+      if (action === 'decline') {
+        io.emit('dispatch_escalated', {
+          incidentId,
+          declinedBy: uid,
+          message: `${uid} declined — escalating to next responder`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+
+      // Persist to DB via HTTP PATCH (client should also call /api/emergency/:id/dispatch)
+    });
+
+    // Mark safe
     socket.on('mark_safe', (userId) => {
       io.emit('user_safe', { userId: userId || uid, timestamp: new Date().toISOString() });
     });
 
-    // Handle disconnect
-    socket.on('disconnect', (reason) => {
+    // Disconnect
+    socket.on('disconnect', () => {
       updateUserOnlineStatus(uid, false);
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`[Socket] Client disconnected: ${uid} (${reason})`);
-      }
     });
 
-    // Send initial connection ack
+    // ACK
     socket.emit('connected', {
-      message: 'Connected to AegisNet AI real-time network',
-      serverId: socket.id,
+      message: 'AegisNet AI — Real-time network active',
+      uid,
+      role,
       timestamp: new Date().toISOString(),
     });
+
+    updateUserOnlineStatus(uid, true);
   });
 
   return io;
@@ -101,10 +123,7 @@ async function updateUserOnlineStatus(uid, isOnline) {
   const admin = getAdmin();
   if (!admin) return;
   try {
-    await admin.firestore().collection('users').doc(uid).update({
-      isOnline,
-      lastSeen: new Date().toISOString(),
-    });
+    await admin.firestore().collection('users').doc(uid).update({ isOnline, lastSeen: new Date().toISOString() });
   } catch {}
 }
 
@@ -119,8 +138,6 @@ async function updateResponderLocation(uid, location) {
   } catch {}
 }
 
-function getSocket() {
-  return io;
-}
+function getSocket() { return io; }
 
 module.exports = { initSocket, getSocket };
